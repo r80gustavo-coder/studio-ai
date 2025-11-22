@@ -1,28 +1,39 @@
 import { NextResponse } from "next/server";
 import Replicate from "replicate";
 
-const replicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN,
-});
-
 export async function POST(request: Request) {
+  console.log("Recebi uma chamada na API...");
+
   try {
+    // 1. Diagnóstico de Chave
+    const token = process.env.REPLICATE_API_TOKEN;
+    if (!token) {
+      console.error("ERRO GRAVE: REPLICATE_API_TOKEN não foi encontrado nas variáveis de ambiente.");
+      return NextResponse.json({ error: "ERRO DE CONFIGURAÇÃO: A chave REPLICATE_API_TOKEN não foi configurada na Vercel." }, { status: 500 });
+    }
+
+    // 2. Configuração do Replicate
+    const replicate = new Replicate({
+      auth: token,
+    });
+
     const body = await request.json();
     
-    // MODO 1: CHECAR STATUS (Se receber um ID, verifica se tá pronto)
+    // MODO 1: CHECAR STATUS
     if (body.predictionId) {
       const prediction = await replicate.predictions.get(body.predictionId);
       return NextResponse.json(prediction);
     }
 
-    // MODO 2: CRIAR NOVA IMAGEM (Se receber imagens, manda criar)
+    // MODO 2: CRIAR NOVA IMAGEM
     const { human_img, garm_img, category } = body;
 
     if (!human_img || !garm_img) {
-      return NextResponse.json({ error: "Imagens faltando" }, { status: 400 });
+      return NextResponse.json({ error: "Imagens faltando na requisição" }, { status: 400 });
     }
 
-    // Nota: Usamos predictions.create em vez de run para não travar a Vercel
+    console.log("Iniciando geração no Replicate...");
+    
     const prediction = await replicate.predictions.create({
       version: "c871bb9b046607428d795a5f08d2387775c74209",
       input: {
@@ -34,10 +45,11 @@ export async function POST(request: Request) {
       }
     });
 
+    console.log("Geração iniciada com ID:", prediction.id);
     return NextResponse.json(prediction);
 
   } catch (error: any) {
-    console.error("Erro no Replicate:", error);
-    return NextResponse.json({ error: error.message || "Falha interna" }, { status: 500 });
+    console.error("Erro DETALHADO no Replicate:", error);
+    return NextResponse.json({ error: error.message || "Erro interno desconhecido" }, { status: 500 });
   }
 }
