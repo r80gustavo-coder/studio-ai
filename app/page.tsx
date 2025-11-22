@@ -4,13 +4,11 @@ import React, { useState, useEffect } from 'react';
 import { Upload, Shirt, User, Wand2, Settings, Loader2, CheckCircle2, AlertCircle, Layers } from 'lucide-react';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// --- TIPAGEM (CRUCIAL PARA PASSAR NO BUILD DA VERCEL) ---
 interface AlertProps {
   children: React.ReactNode;
   type?: 'info' | 'error';
 }
 
-// --- COMPONENTES UI ---
 const Alert = ({ children, type = 'info' }: AlertProps) => (
   <div className={`p-4 rounded-lg border flex items-start gap-3 mb-4 ${
     type === 'error' ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'
@@ -21,7 +19,6 @@ const Alert = ({ children, type = 'info' }: AlertProps) => (
 );
 
 export default function Home() {
-  // --- ESTADOS COM TIPAGEM CORRETA ---
   const [activeTab, setActiveTab] = useState<string>('studio'); 
   const [loading, setLoading] = useState<boolean>(false);
   const [statusMsg, setStatusMsg] = useState<string>('');
@@ -35,12 +32,10 @@ export default function Home() {
 
   const [config, setConfig] = useState({ supabaseUrl: '', supabaseKey: '' });
   const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
-  const [gallery, setGallery] = useState<any[]>([]); // 'any' permitido aqui para simplificar
+  const [gallery, setGallery] = useState<any[]>([]); 
   const [systemError, setSystemError] = useState<{title: string, msg: string} | null>(null);
 
-  // --- INICIALIZAÇÃO ---
   useEffect(() => {
-    // Carrega configs salvas no navegador para não precisar digitar sempre
     const savedUrl = localStorage.getItem('sb_url');
     const savedKey = localStorage.getItem('sb_key');
     if (savedUrl && savedKey) setConfig({ supabaseUrl: savedUrl, supabaseKey: savedKey });
@@ -60,7 +55,6 @@ export default function Home() {
     }
   }, [config.supabaseUrl, config.supabaseKey]);
 
-  // --- LÓGICA ---
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'garment' | 'model') => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -69,49 +63,69 @@ export default function Home() {
     else { setModelImage(file); setModelPreview(previewUrl); }
   };
 
-  // Função de Upload para o Supabase
   const uploadToSupabase = async (client: SupabaseClient, path: string, file: File) => {
-    // Tenta fazer o upload
     const { error } = await client.storage.from('studio').upload(path, file);
-    
-    // Se der erro, verifica se é porque o arquivo já existe, se for, tudo bem
+    // Ignora erro se arquivo já existir (409)
     if (error && (error as any).statusCode !== "409" && !error.message.includes("already exists")) {
        throw error;
     }
-    
     const { data: publicUrl } = client.storage.from('studio').getPublicUrl(path);
     return publicUrl.publicUrl;
   };
 
-  // Chama o nosso Backend (API Route) para esconder a chave do Replicate
+  // --- NOVA LÓGICA DE POLLING (ESPERA INTELIGENTE) ---
   const callBackendAPI = async (garmentUrl: string, modelUrl: string) => {
-    const response = await fetch("/api/generate", {
+    // 1. Iniciar o trabalho (Envia POST com as imagens)
+    const startResponse = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        human_img: modelUrl,
-        garm_img: garmentUrl,
-        category: category
-      })
+      body: JSON.stringify({ human_img: modelUrl, garm_img: garmentUrl, category: category })
     });
 
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error || "Erro ao conectar com API");
+    if (!startResponse.ok) {
+      const text = await startResponse.text();
+      throw new Error(`Falha ao iniciar IA: ${text.slice(0, 100)}`);
     }
     
-    const result = await response.json();
-    return result; // O Replicate retorna a URL da imagem gerada
+    const startData = await startResponse.json();
+    if (startData.error) throw new Error(startData.error);
+
+    const predictionId = startData.id;
+    let status = startData.status;
+    let output = null;
+
+    // 2. Loop de verificação (Pergunta "tá pronto?" a cada 3s)
+    while (status !== "succeeded" && status !== "failed" && status !== "canceled") {
+       setStatusMsg(`IA Trabalhando: ${status}...`);
+       await new Promise(r => setTimeout(r, 3000)); // Espera 3 segundos
+
+       const checkResponse = await fetch("/api/generate", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ predictionId: predictionId }) // Envia apenas o ID para checar status
+       });
+
+       if (!checkResponse.ok) throw new Error("Erro ao checar status da IA");
+       
+       const checkData = await checkResponse.json();
+       status = checkData.status;
+       output = checkData.output;
+    }
+
+    if (status === "failed" || status === "canceled") {
+      throw new Error("A IA falhou ao gerar a imagem.");
+    }
+
+    return output; // Retorna a imagem final quando status for 'succeeded'
   };
 
-  // Fluxo Principal de Geração
   const handleGenerate = async () => {
     if (!garmentImage || !modelImage) return alert("Faltam imagens!");
     if (!supabase) return alert("Configure o Supabase na aba Configurações primeiro!");
     
     setLoading(true);
     setSystemError(null);
-    setStatusMsg("Enviando imagens para a nuvem...");
+    setStatusMsg("Enviando imagens...");
 
     try {
       const cleanName = (n: string) => n.replace(/[^a-zA-Z0-9.]/g, '');
@@ -119,17 +133,14 @@ export default function Home() {
       const gPath = `g_${timestamp}_${cleanName(garmentImage.name)}`;
       const mPath = `m_${timestamp}_${cleanName(modelImage.name)}`;
 
-      // 1. Upload
       const gUrl = await uploadToSupabase(supabase, gPath, garmentImage);
       const mUrl = await uploadToSupabase(supabase, mPath, modelImage);
 
-      // 2. Processamento IA
-      setStatusMsg("Processando com IA (Pode demorar 30s)...");
+      setStatusMsg("Iniciando IA...");
       const finalUrl = await callBackendAPI(gUrl, mUrl);
 
       setResultImage(finalUrl);
 
-      // 3. Salvar no Histórico
       await supabase.from('catalog').insert({
         garment_url: gUrl, model_url: mUrl, result_url: finalUrl 
       });
@@ -148,7 +159,6 @@ export default function Home() {
     if (data) setGallery(data);
   };
 
-  // --- RENDERIZAÇÃO (O QUE APARECE NA TELA) ---
   return (
     <div className="min-h-screen bg-[#0f0f12] text-white font-sans p-6">
       <header className="max-w-6xl mx-auto flex justify-between items-center mb-8 border-b border-white/10 pb-4">
@@ -167,7 +177,6 @@ export default function Home() {
 
         {activeTab === 'studio' && (
           <div className="grid lg:grid-cols-3 gap-8">
-            {/* Coluna da Esquerda: Inputs */}
             <div className="space-y-6">
               <div className="bg-[#18181b] p-4 rounded-xl border border-white/10">
                 <h3 className="text-xs font-bold text-gray-500 mb-3 uppercase">Categoria</h3>
@@ -178,7 +187,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Upload Roupa */}
               <div className="bg-[#18181b] p-6 rounded-xl border border-white/10 relative group mb-4">
                  <div className="flex justify-between mb-4 text-sm text-gray-300 font-medium">
                     <span className="flex gap-2 items-center"><Shirt size={16}/> Roupa</span>
@@ -190,7 +198,6 @@ export default function Home() {
                  </div>
               </div>
 
-              {/* Upload Modelo */}
               <div className="bg-[#18181b] p-6 rounded-xl border border-white/10 relative group">
                  <div className="flex justify-between mb-4 text-sm text-gray-300 font-medium">
                     <span className="flex gap-2 items-center"><User size={16}/> Modelo</span>
@@ -203,7 +210,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Coluna da Direita: Resultado */}
             <div className="lg:col-span-2 bg-[#18181b] rounded-xl border border-white/10 p-2 flex flex-col min-h-[500px]">
               <div className="flex-1 bg-black/40 rounded-lg relative flex items-center justify-center overflow-hidden">
                 {!resultImage && !loading && <div className="text-gray-600 flex flex-col items-center"><Layers size={48} className="mb-4 opacity-50"/><p>Aguardando geração...</p></div>}
@@ -242,7 +248,7 @@ export default function Home() {
               <input type="password" value={config.supabaseKey} onChange={e=>setConfig({...config, supabaseKey: e.target.value})} className="w-full bg-black/30 border border-white/10 rounded p-2 text-sm text-white"/>
             </div>
             <div className="p-4 bg-purple-500/10 border border-purple-500/20 rounded text-xs text-purple-300">
-              Nota: A chave do Replicate agora deve ser configurada nas <strong>Variáveis de Ambiente (Environment Variables)</strong> no site da Vercel, e não aqui.
+              Nota: A chave do Replicate agora deve ser configurada na <strong>Vercel</strong> (Environment Variables), não aqui. Isso mantém sua conta segura.
             </div>
           </div>
         )}
